@@ -1,0 +1,162 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <DHT.h>
+
+#define DHTPIN 19
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+
+// Sensor
+#define MQ4_PIN 34
+#define PH_PIN 32
+#define PRESSURE_PIN 35
+
+// Aktuator
+#define LED_R 5
+#define LED_G 17
+#define LED_B 16
+#define BUZZER 18
+#define RELAY 4
+
+// WiFi dan Telegram
+const char* ssid = "JUWITA";
+const char* password = "parangbaris";
+String telegramBotToken = "7569787538:AAHFKmpGm5mNRk4vUEfXVwu3lJuZQoE0qzk";
+String chatID = "1277124604";
+
+// ThingsBoard Endpoints
+String tb_ph = "http://demo.thingsboard.io/api/v1/phsensor/telemetry";
+String tb_dht = "http://demo.thingsboard.io/api/v1/dht22sensor/telemetry";
+String tb_pressure = "http://demo.thingsboard.io/api/v1/pressuresensor/telemetry";
+String tb_mq4 = "http://demo.thingsboard.io/api/v1/sensormq4/telemetry";
+
+// Status sistem
+enum Status { AMAN, RATA_RATA, TIDAK_AMAN };
+Status status_sistem;
+
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+
+  pinMode(MQ4_PIN, INPUT);
+  pinMode(PH_PIN, INPUT);
+  pinMode(PRESSURE_PIN, INPUT);
+  pinMode(LED_R, OUTPUT);
+  pinMode(LED_G, OUTPUT);
+  pinMode(LED_B, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+  pinMode(RELAY, OUTPUT);
+
+  WiFi.begin(ssid, password);
+  Serial.print("Menghubungkan WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi Terhubung.");
+}
+
+void loop() {
+  // Baca sensor
+  int mq4 = analogRead(MQ4_PIN); // 0-4095
+  float ppm = map(mq4, 0, 4095, 200, 3000); // asumsi konversi MQ-4
+  float suhu = dht.readTemperature();
+  float kelembaban = dht.readHumidity();
+  float ph = map(analogRead(PH_PIN), 0, 4095, 0, 14); // asumsi pH linear
+  float tekanan = map(analogRead(PRESSURE_PIN), 0, 4095, 0, 50); // asumsi MPX5050 0-50 kPa
+
+  // Evaluasi status
+  status_sistem = evaluasi(ppm, suhu, kelembaban, ph, tekanan);
+
+  // Kontrol Aktuator & Kirim Data
+  kontrolStatus(status_sistem);
+  kirimThingsBoard(ppm, suhu, kelembaban, ph, tekanan);
+  kirimTelegram(ppm, suhu, kelembaban, ph, tekanan, status_sistem);
+
+  delay(10000); // tunggu 10 detik sebelum baca lagi
+}
+
+Status evaluasi(float ppm, float suhu, float hum, float ph, float press) {
+  bool aman = (ppm >= 800 && ppm <= 1600) &&
+              (suhu >= 35 && suhu <= 40) &&
+              (hum >= 60 && hum <= 75) &&
+              (ph >= 6.0 && ph <= 7.0) &&
+              (press >= 11 && press <= 19);
+
+  bool rata = ((ppm >= 600 && ppm < 800) || (ppm > 1600 && ppm <= 1800)) ||
+              ((suhu >= 33 && suhu < 35) || (suhu > 40 && suhu <= 41.5)) ||
+              ((hum >= 55 && hum < 60) || (hum > 75 && hum <= 80)) ||
+              ((ph >= 5.5 && ph < 6.0) || (ph > 7.0 && ph <= 7.5)) ||
+              ((press >= 9 && press < 11) || (press > 19 && press <= 21));
+
+  return aman ? AMAN : (rata ? RATA_RATA : TIDAK_AMAN);
+}
+
+void kontrolStatus(Status s) {
+  switch (s) {
+    case AMAN:
+      setRGB(0, 0, 255);
+      digitalWrite(BUZZER, LOW);
+      digitalWrite(RELAY, LOW);
+      break;
+    case RATA_RATA:
+      setRGB(0, 255, 0);
+      digitalWrite(BUZZER, LOW);
+      digitalWrite(RELAY, LOW);
+      break;
+    case TIDAK_AMAN:
+      setRGB(255, 0, 0);
+      tone(BUZZER, 1000, 500);
+      digitalWrite(RELAY, HIGH);
+      break;
+  }
+}
+
+void setRGB(int r, int g, int b) {
+  analogWrite(LED_R, r);
+  analogWrite(LED_G, g);
+  analogWrite(LED_B, b);
+}
+
+void kirimThingsBoard(float ppm, float suhu, float hum, float ph, float tekanan) {
+  kirimHTTP(tb_mq4, "{\"metana\":" + String(ppm) + "}");
+  kirimHTTP(tb_dht, "{\"suhu\":" + String(suhu) + ", \"kelembaban\":" + String(hum) + "}");
+  kirimHTTP(tb_ph, "{\"ph\":" + String(ph) + "}");
+  kirimHTTP(tb_pressure, "{\"tekanan\":" + String(tekanan) + "}");
+}
+
+void kirimHTTP(String url, String data) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+    int code = http.POST(data);
+    if (code > 0) Serial.println("Data terkirim ke ThingsBoard");
+    else Serial.println("Gagal kirim data");
+    http.end();
+  }
+}
+
+void kirimTelegram(float ppm, float suhu, float hum, float ph, float tekanan, Status s) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String msg = "Status Sistem: ";
+    switch (s) {
+      case AMAN: msg += "AMAN ✅\n"; break;
+      case RATA_RATA: msg += "RATA-RATA ⚠️\n"; break;
+      case TIDAK_AMAN: msg += "TIDAK AMAN ❌\n"; break;
+    }
+    msg += "Metana: " + String(ppm) + " ppm\n";
+    msg += "Suhu: " + String(suhu) + " °C\n";
+    msg += "Kelembaban: " + String(hum) + " %\n";
+    msg += "pH: " + String(ph) + "\n";
+    msg += "Tekanan: " + String(tekanan) + " kPa";
+
+    String url = "https://api.telegram.org/bot" + telegramBotToken + "/sendMessage?chat_id=" + chatID + "&text=" + msg;
+    http.begin(url);
+    int code = http.GET();
+    if (code > 0) Serial.println("Notifikasi Telegram terkirim");
+    else Serial.println("Gagal kirim notifikasi Telegram");
+    http.end();
+  }
+}
