@@ -1,162 +1,191 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <DHT.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 
-#define DHTPIN 19
-#define DHTTYPE DHT22
-DHT dht(DHTPIN, DHTTYPE);
-
-// Sensor
-#define MQ4_PIN 34
-#define PH_PIN 32
-#define PRESSURE_PIN 35
-
-// Aktuator
-#define LED_R 5
-#define LED_G 17
-#define LED_B 16
-#define BUZZER 18
-#define RELAY 4
-
-// WiFi dan Telegram
+// WiFi & Telegram
 const char* ssid = "JUWITA";
 const char* password = "parangbaris";
 String telegramBotToken = "7569787538:AAHFKmpGm5mNRk4vUEfXVwu3lJuZQoE0qzk";
 String chatID = "1277124604";
 
 // ThingsBoard Endpoints
-String tb_ph = "http://demo.thingsboard.io/api/v1/phsensor/telemetry";
-String tb_dht = "http://demo.thingsboard.io/api/v1/dht22sensor/telemetry";
-String tb_pressure = "http://demo.thingsboard.io/api/v1/pressuresensor/telemetry";
-String tb_mq4 = "http://demo.thingsboard.io/api/v1/sensormq4/telemetry";
+const char* tb_mq4 = "http://demo.thingsboard.io/api/v1/sensormq4/telemetry";
+const char* tb_dht = "http://demo.thingsboard.io/api/v1/dht22sensor/telemetry";
+const char* tb_ph  = "http://demo.thingsboard.io/api/v1/phsensor/telemetry";
+const char* tb_press = "http://demo.thingsboard.io/api/v1/pressuresensor/telemetry";
 
-// Status sistem
-enum Status { AMAN, RATA_RATA, TIDAK_AMAN };
-Status status_sistem;
+// Pin Setup
+#define MQ4_PIN      34
+#define PH_PIN       32
+#define PRESS_PIN    35
+#define DHT_PIN      19
+#define RED_LED      5
+#define GREEN_LED    17
+#define BLUE_LED     16
+#define RELAY_PIN    4
+#define BUZZER_PIN   18
+
+// DHT Setup
+#define DHTTYPE DHT22
+DHT dht(DHT_PIN, DHTTYPE);
+
+// LCD Setup
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Enum State
+enum State {
+  AMAN,
+  RATA_RATA,
+  TIDAK_AMAN
+};
+State kondisi = AMAN;
 
 void setup() {
   Serial.begin(115200);
+
+  // Inisialisasi LCD dan DHT
+  lcd.init();
+  lcd.backlight();
   dht.begin();
 
+  // Mode Pin
   pinMode(MQ4_PIN, INPUT);
   pinMode(PH_PIN, INPUT);
-  pinMode(PRESSURE_PIN, INPUT);
-  pinMode(LED_R, OUTPUT);
-  pinMode(LED_G, OUTPUT);
-  pinMode(LED_B, OUTPUT);
-  pinMode(BUZZER, OUTPUT);
-  pinMode(RELAY, OUTPUT);
+  pinMode(PRESS_PIN, INPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(BLUE_LED, OUTPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
 
+  // Koneksi WiFi
   WiFi.begin(ssid, password);
-  Serial.print("Menghubungkan WiFi");
+  lcd.setCursor(0, 0);
+  lcd.print("Menghubungkan WiFi");
   while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
+    delay(1000);
     Serial.print(".");
   }
-  Serial.println("\nWiFi Terhubung.");
+  lcd.clear();
+  lcd.print("WiFi Terhubung!");
+  delay(1000);
+  lcd.clear();
 }
 
 void loop() {
-  // Baca sensor
-  int mq4 = analogRead(MQ4_PIN); // 0-4095
-  float ppm = map(mq4, 0, 4095, 200, 3000); // asumsi konversi MQ-4
+  int mq4_ppm = analogRead(MQ4_PIN); // Simulasi range 0–4095
   float suhu = dht.readTemperature();
-  float kelembaban = dht.readHumidity();
-  float ph = map(analogRead(PH_PIN), 0, 4095, 0, 14); // asumsi pH linear
-  float tekanan = map(analogRead(PRESSURE_PIN), 0, 4095, 0, 50); // asumsi MPX5050 0-50 kPa
+  float hum = dht.readHumidity();
+  float phVal = analogRead(PH_PIN) * (14.0 / 4095.0); // konversi ADC ke pH 0–14
+  float pressure = analogRead(PRESS_PIN) * (25.0 / 4095.0); // konversi ADC ke kPa
 
-  // Evaluasi status
-  status_sistem = evaluasi(ppm, suhu, kelembaban, ph, tekanan);
+  kondisi = evaluasiStatus(mq4_ppm, suhu, hum, phVal, pressure);
+  kontrolSistem(kondisi, mq4_ppm, suhu, hum, phVal, pressure);
+  kirimThingsBoard(mq4_ppm, suhu, hum, phVal, pressure);
 
-  // Kontrol Aktuator & Kirim Data
-  kontrolStatus(status_sistem);
-  kirimThingsBoard(ppm, suhu, kelembaban, ph, tekanan);
-  kirimTelegram(ppm, suhu, kelembaban, ph, tekanan, status_sistem);
-
-  delay(10000); // tunggu 10 detik sebelum baca lagi
+  delay(10000); // 10 detik interval
 }
 
-Status evaluasi(float ppm, float suhu, float hum, float ph, float press) {
-  bool aman = (ppm >= 800 && ppm <= 1600) &&
+State evaluasiStatus(int mq4, float suhu, float hum, float ph, float tekanan) {
+  bool aman = (mq4 >= 800 && mq4 <= 1600) &&
               (suhu >= 35 && suhu <= 40) &&
               (hum >= 60 && hum <= 75) &&
               (ph >= 6.0 && ph <= 7.0) &&
-              (press >= 11 && press <= 19);
+              (tekanan >= 11 && tekanan <= 19);
 
-  bool rata = ((ppm >= 600 && ppm < 800) || (ppm > 1600 && ppm <= 1800)) ||
-              ((suhu >= 33 && suhu < 35) || (suhu > 40 && suhu <= 41.5)) ||
-              ((hum >= 55 && hum < 60) || (hum > 75 && hum <= 80)) ||
-              ((ph >= 5.5 && ph < 6.0) || (ph > 7.0 && ph <= 7.5)) ||
-              ((press >= 9 && press < 11) || (press > 19 && press <= 21));
+  bool rata2 = ((mq4 >= 600 && mq4 < 800) || (mq4 > 1600 && mq4 <= 1800)) ||
+               ((suhu >= 33 && suhu < 35) || (suhu > 40 && suhu <= 41.5)) ||
+               ((hum >= 55 && hum < 60) || (hum > 75 && hum <= 80)) ||
+               ((ph >= 5.5 && ph < 6.0) || (ph > 7.0 && ph <= 7.5)) ||
+               ((tekanan >= 9 && tekanan < 11) || (tekanan > 19 && tekanan <= 21));
 
-  return aman ? AMAN : (rata ? RATA_RATA : TIDAK_AMAN);
+  if (aman) return AMAN;
+  else if (rata2) return RATA_RATA;
+  else return TIDAK_AMAN;
 }
 
-void kontrolStatus(Status s) {
-  switch (s) {
+void kontrolSistem(State state, int mq4, float suhu, float hum, float ph, float tekanan) {
+  String pesan;
+
+  switch (state) {
     case AMAN:
       setRGB(0, 0, 255);
-      digitalWrite(BUZZER, LOW);
-      digitalWrite(RELAY, LOW);
+      digitalWrite(RELAY_PIN, LOW);
+      noTone(BUZZER_PIN);
+      lcd.setCursor(0, 0); lcd.print("Status: AMAN     ");
+      pesan = formatPesan(mq4, suhu, hum, ph, tekanan, "Sistem Beroperasi Normal dan Aman ✅");
       break;
+
     case RATA_RATA:
       setRGB(0, 255, 0);
-      digitalWrite(BUZZER, LOW);
-      digitalWrite(RELAY, LOW);
+      digitalWrite(RELAY_PIN, LOW);
+      noTone(BUZZER_PIN);
+      lcd.setCursor(0, 0); lcd.print("Status: RATA2    ");
+      pesan = formatPesan(mq4, suhu, hum, ph, tekanan, "Sistem Beroperasi Rata-rata ⚠️");
       break;
+
     case TIDAK_AMAN:
       setRGB(255, 0, 0);
-      tone(BUZZER, 1000, 500);
-      digitalWrite(RELAY, HIGH);
+      digitalWrite(RELAY_PIN, HIGH);
+      tone(BUZZER_PIN, 3000, 500);
+      lcd.setCursor(0, 0); lcd.print("Status: BAHAYA   ");
+      pesan = formatPesan(mq4, suhu, hum, ph, tekanan, "Sistem Beroperasi Tidak Aman ❌");
       break;
   }
+
+  sendMessageToTelegram(pesan);
+  lcd.setCursor(0, 1);
+  lcd.print("CH4:");
+  lcd.print(mq4);
+  lcd.print("ppm");
+}
+
+String formatPesan(int mq4, float suhu, float hum, float ph, float tekanan, String status) {
+  String pesan = "💨 Kadar CH4 (ppm) : " + String(mq4);
+  pesan += "\n🌡️ Suhu  (C)  : " + String(suhu, 1);
+  pesan += "\n💧 Kelembaban (%) : " + String(hum, 1);
+  pesan += "\n⚗️ pH : " + String(ph, 2);
+  pesan += "\n📈 Tekanan (kPa) : " + String(tekanan, 1);
+  pesan += "\nStatus : " + status;
+  return pesan;
 }
 
 void setRGB(int r, int g, int b) {
-  analogWrite(LED_R, r);
-  analogWrite(LED_G, g);
-  analogWrite(LED_B, b);
+  analogWrite(RED_LED, r);
+  analogWrite(GREEN_LED, g);
+  analogWrite(BLUE_LED, b);
 }
 
-void kirimThingsBoard(float ppm, float suhu, float hum, float ph, float tekanan) {
-  kirimHTTP(tb_mq4, "{\"metana\":" + String(ppm) + "}");
-  kirimHTTP(tb_dht, "{\"suhu\":" + String(suhu) + ", \"kelembaban\":" + String(hum) + "}");
-  kirimHTTP(tb_ph, "{\"ph\":" + String(ph) + "}");
-  kirimHTTP(tb_pressure, "{\"tekanan\":" + String(tekanan) + "}");
+void kirimThingsBoard(int mq4, float suhu, float hum, float ph, float tekanan) {
+  kirimData(tb_mq4, "{\"metana\":" + String(mq4) + "}");
+  kirimData(tb_dht, "{\"suhu\":" + String(suhu) + ", \"kelembaban\":" + String(hum) + "}");
+  kirimData(tb_ph, "{\"ph\":" + String(ph, 2) + "}");
+  kirimData(tb_press, "{\"tekanan\":" + String(tekanan, 1) + "}");
 }
 
-void kirimHTTP(String url, String data) {
+void kirimData(const char* endpoint, String payload) {
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
-    http.begin(url);
+    http.begin(endpoint);
     http.addHeader("Content-Type", "application/json");
-    int code = http.POST(data);
-    if (code > 0) Serial.println("Data terkirim ke ThingsBoard");
-    else Serial.println("Gagal kirim data");
+    int response = http.POST(payload);
+    if (response <= 0) Serial.println("Gagal kirim ke ThingsBoard");
     http.end();
   }
 }
 
-void kirimTelegram(float ppm, float suhu, float hum, float ph, float tekanan, Status s) {
+void sendMessageToTelegram(String message) {
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
-    String msg = "Status Sistem: ";
-    switch (s) {
-      case AMAN: msg += "AMAN ✅\n"; break;
-      case RATA_RATA: msg += "RATA-RATA ⚠️\n"; break;
-      case TIDAK_AMAN: msg += "TIDAK AMAN ❌\n"; break;
-    }
-    msg += "Metana: " + String(ppm) + " ppm\n";
-    msg += "Suhu: " + String(suhu) + " °C\n";
-    msg += "Kelembaban: " + String(hum) + " %\n";
-    msg += "pH: " + String(ph) + "\n";
-    msg += "Tekanan: " + String(tekanan) + " kPa";
-
-    String url = "https://api.telegram.org/bot" + telegramBotToken + "/sendMessage?chat_id=" + chatID + "&text=" + msg;
+    String url = "https://api.telegram.org/bot" + telegramBotToken +
+                 "/sendMessage?chat_id=" + chatID + "&text=" + message;
     http.begin(url);
-    int code = http.GET();
-    if (code > 0) Serial.println("Notifikasi Telegram terkirim");
-    else Serial.println("Gagal kirim notifikasi Telegram");
+    int httpResponseCode = http.GET();
+    if (httpResponseCode <= 0) {
+      Serial.println("Gagal kirim ke Telegram");
+    }
     http.end();
   }
 }
