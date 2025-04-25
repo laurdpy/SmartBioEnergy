@@ -5,9 +5,9 @@
 #include <LiquidCrystal_I2C.h>
 
 // WiFi & Telegram
-const char* ssid = "JUWITA";
-const char* password = "parangbaris";
-String telegramBotToken = "7569787538:AAHFKmpGm5mNRk4vUEfXVwu3lJuZQoE0qzk";
+const char* ssid = "JUWITA"; //Nama Wifi yang akan digunakan
+const char* password = "Laurensia55"; //atau masukan password Wifi yang akan dikoneksikan
+String telegramBotToken = "7628970118:AAGSvVTaEM27nMTYJ-TootRpg-PZIEicCiM";
 String chatID = "1277124604";
 
 // ThingsBoard Endpoints
@@ -37,8 +37,8 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 // Enum State
 enum State {
   AMAN,
-  RATA_RATA,
-  TIDAK_AMAN
+  WASPADA,
+  BAHAYA
 };
 State kondisi = AMAN;
 
@@ -95,15 +95,15 @@ State evaluasiStatus(int mq4, float suhu, float hum, float ph, float tekanan) {
               (ph >= 6.0 && ph <= 7.0) &&
               (tekanan >= 11 && tekanan <= 19);
 
-  bool rata2 = ((mq4 >= 600 && mq4 < 800) || (mq4 > 1600 && mq4 <= 1800)) ||
+  bool waspada = ((mq4 >= 600 && mq4 < 800) || (mq4 > 1600 && mq4 <= 1800)) ||
                ((suhu >= 33 && suhu < 35) || (suhu > 40 && suhu <= 41.5)) ||
                ((hum >= 55 && hum < 60) || (hum > 75 && hum <= 80)) ||
                ((ph >= 5.5 && ph < 6.0) || (ph > 7.0 && ph <= 7.5)) ||
                ((tekanan >= 9 && tekanan < 11) || (tekanan > 19 && tekanan <= 21));
 
   if (aman) return AMAN;
-  else if (rata2) return RATA_RATA;
-  else return TIDAK_AMAN;
+  else if (rata2) return WASPADA;
+  else return BAHAYA;
 }
 
 void kontrolSistem(State state, int mq4, float suhu, float hum, float ph, float tekanan) {
@@ -118,20 +118,20 @@ void kontrolSistem(State state, int mq4, float suhu, float hum, float ph, float 
       pesan = formatPesan(mq4, suhu, hum, ph, tekanan, "Sistem Beroperasi Normal dan Aman ✅");
       break;
 
-    case RATA_RATA:
+    case WASPADA:
       setRGB(0, 255, 0);
       digitalWrite(RELAY_PIN, LOW);
       noTone(BUZZER_PIN);
       lcd.setCursor(0, 0); lcd.print("Status: RATA2    ");
-      pesan = formatPesan(mq4, suhu, hum, ph, tekanan, "Sistem Beroperasi Rata-rata ⚠️");
+      pesan = formatPesan(mq4, suhu, hum, ph, tekanan, "Sistem Beroperasi Waspada ⚠️");
       break;
 
-    case TIDAK_AMAN:
+    case BAHAYA:
       setRGB(255, 0, 0);
       digitalWrite(RELAY_PIN, HIGH);
       tone(BUZZER_PIN, 3000, 500);
       lcd.setCursor(0, 0); lcd.print("Status: BAHAYA   ");
-      pesan = formatPesan(mq4, suhu, hum, ph, tekanan, "Sistem Beroperasi Tidak Aman ❌");
+      pesan = formatPesan(mq4, suhu, hum, ph, tekanan, "Sistem Beroperasi Bahaya ❌");
       break;
   }
 
